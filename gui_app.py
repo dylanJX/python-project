@@ -5,8 +5,8 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from PIL import Image, ImageTk
 
-from detector import MotionDetector
-from drone import Drone
+#from detector import MotionDetector
+#from drone import Drone
 # from logger import DetectionLogger   # TODO: uncomment when logger.py is ready
 
 
@@ -37,8 +37,8 @@ class VisionDroneApp:
         self.frame_height, self.frame_width = frame.shape[:2]
 
         # Initialize core modules
-        self.detector = MotionDetector()
-        self.drone = Drone(self.frame_width, self.frame_height)
+        #self.detector = MotionDetector()
+       # self.drone = Drone(self.frame_width, self.frame_height)
 
         # TODO: create logger when logger.py is implemented
         # self.logger = DetectionLogger("detections.csv")
@@ -179,8 +179,8 @@ class VisionDroneApp:
         self.frame_height, self.frame_width = frame.shape[:2]
 
         # Recreate detector and drone with new resolution
-        self.detector = MotionDetector()
-        self.drone = Drone(self.frame_width, self.frame_height)
+       # self.detector = MotionDetector()
+       # self.drone = Drone(self.frame_width, self.frame_height)
 
         self.frame_id = 0
         self.last_time = time.time()
