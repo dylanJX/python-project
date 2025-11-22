@@ -5,190 +5,196 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from PIL import Image, ImageTk
 
-#from detector import MotionDetector
-#from drone import Drone
-# from logger import DetectionLogger   # TODO: uncomment when logger.py is ready
+# from detector import MotionDetector
+# from drone import Drone
+
+from wildlife_data import WildlifeDataset
+# from logger import DetectionLogger   # Also disabled for now
 
 
 class VisionDroneApp:
     """
-    VisionDroneApp integrates:
-    - Video streaming (camera or video file via OpenCV)
-    - Motion detection
-    - Drone simulation
-    - Tkinter GUI with interactive controls
-    - Optional CSV logging and video recording
+    A simplified GUI application that supports:
+    - Camera or video file streaming
+    - Optional video recording
+    - Wildlife dataset loading and summary display
+    The MotionDetector and Drone modules are currently disabled.
     """
 
     def __init__(self, cam_index=0):
-        # Current video source (camera index or file path string)
+        # Store initial video source
         self.source = cam_index
         self.source_is_file = False
 
-        # Open initial camera
+        # Open the initial camera
         self.cap = cv2.VideoCapture(self.source)
         if not self.cap.isOpened():
-            raise RuntimeError("Failed to open initial video source.")
+            raise RuntimeError("Failed to open the initial camera.")
 
-        # Read one frame to obtain resolution
+        # Read a test frame to determine resolution
         ret, frame = self.cap.read()
         if not ret:
-            raise RuntimeError("Failed to read initial frame from source.")
+            raise RuntimeError("Failed to read the first frame from the camera.")
         self.frame_height, self.frame_width = frame.shape[:2]
 
-        # Initialize core modules
-        #self.detector = MotionDetector()
-       # self.drone = Drone(self.frame_width, self.frame_height)
+        # ---------------------------------------------------------
+        # MotionDetector / Drone temporarily disabled
+        # ---------------------------------------------------------
+        # self.detector = MotionDetector()
+        # self.drone = Drone(self.frame_width, self.frame_height)
 
-        # TODO: create logger when logger.py is implemented
-        # self.logger = DetectionLogger("detections.csv")
+        # Wildlife dataset (None until user loads a CSV file)
+        self.dataset: WildlifeDataset | None = None
 
-        # ------- Video recording state -------
+        # Recording settings
         self.recording_enabled = tk.BooleanVar(value=False)
         self.video_writer = None
 
-        # ------- Tkinter Setup -------
+        # Tkinter root window
         self.root = tk.Tk()
         self.root.title("VisionDrone Tracking System")
 
-        # GUI state variables
-        self.mode_var = tk.StringVar(value="MANUAL")   # MANUAL or AUTO
-        self.sensitivity_var = tk.IntVar(value=40)     # varThreshold
-        self.min_area_var = tk.IntVar(value=1500)      # min contour area
-        self.logging_enabled = tk.BooleanVar(value=False)  # CSV logging on/off
+        # GUI state variables (some unused until detector/drone are re-enabled)
+        self.mode_var = tk.StringVar(value="MANUAL")
+        self.sensitivity_var = tk.IntVar(value=40)
+        self.min_area_var = tk.IntVar(value=1500)
+        self.logging_enabled = tk.BooleanVar(value=False)
 
+        # Wildlife dataset GUI variable
+        self.species_var = tk.StringVar(value="")
+
+        # Runtime state
         self.running = True
         self.frame_id = 0
         self.last_time = time.time()
         self.fps = 0.0
 
-        # Build UI components
+        # Build all GUI elements
         self._build_ui()
-
-        # Keyboard control (W/A/S/D + Space)
-        self.root.bind("<KeyPress>", self._on_key_press)
 
         # Window close handler
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # Start periodic update loop
-        self._update_loop()
+        # Start the update loop
+        self.root.after(10, self._update_loop)
 
-    # ---------------------------------------------
-    # GUI CONSTRUCTION
-    # ---------------------------------------------
+    # -------------------------------------------------------------
+    # GUI Construction
+    # -------------------------------------------------------------
     def _build_ui(self):
-        """Build all GUI widgets and layout."""
         main_frame = ttk.Frame(self.root)
         main_frame.pack(fill="both", expand=True)
 
-        # Video display label (left side)
+        # Left side video display panel
         self.video_label = ttk.Label(main_frame)
-        self.video_label.grid(row=0, column=0, rowspan=7, padx=5, pady=5)
+        self.video_label.grid(row=0, column=0, rowspan=20, padx=5, pady=5)
 
-        # Control panel (right side)
+        # Right side control panel
         control = ttk.Frame(main_frame)
         control.grid(row=0, column=1, sticky="n", padx=5, pady=5)
 
-        # (1) Start / Stop buttons
+        # Start / Stop buttons
         ttk.Button(control, text="Start", command=self._on_start).grid(row=0, column=0, sticky="ew")
         ttk.Button(control, text="Stop", command=self._on_stop).grid(row=0, column=1, sticky="ew")
 
-        # (2) Mode dropdown (MANUAL / AUTO)
-        ttk.Label(control, text="Mode:").grid(row=1, column=0, sticky="w")
-        ttk.Combobox(
-            control,
-            textvariable=self.mode_var,
-            values=["MANUAL", "AUTO"],
-            state="readonly"
-        ).grid(row=1, column=1, sticky="ew")
+        # Open video file button
+        ttk.Button(control, text="Open Video...", command=self._on_open_video).grid(
+            row=1, column=0, columnspan=2, sticky="ew", pady=5
+        )
 
-        # (3) Sensitivity slider (varThreshold)
-        ttk.Label(control, text="Sensitivity").grid(row=2, column=0, sticky="w")
-        ttk.Scale(
-            control,
-            from_=10,
-            to=100,
-            variable=self.sensitivity_var,
-            command=self._on_sensitivity_change
-        ).grid(row=2, column=1, sticky="ew")
-
-        # (4) Min-area slider
-        ttk.Label(control, text="Min Area").grid(row=3, column=0, sticky="w")
-        ttk.Scale(
-            control,
-            from_=500,
-            to=5000,
-            variable=self.min_area_var,
-            command=self._on_min_area_change
-        ).grid(row=3, column=1, sticky="ew")
-
-        # (5) Logging checkbox (only toggles flag for now)
-        ttk.Checkbutton(
-            control,
-            text="Enable CSV Logging",
-            variable=self.logging_enabled
-        ).grid(row=4, column=0, columnspan=2, sticky="w")
-
-        # (6) Reset drone button
-        ttk.Button(
-            control,
-            text="Reset Drone",
-            command=self._on_reset_drone
-        ).grid(row=5, column=0, columnspan=2, sticky="ew")
-
-        # (7) Open Video button (import video file)
-        ttk.Button(
-            control,
-            text="Open Video...",
-            command=self._on_open_video
-        ).grid(row=6, column=0, columnspan=2, sticky="ew", pady=(4, 0))
-
-        # (8) Record output checkbox (export processed video)
+        # Video recording checkbox
         ttk.Checkbutton(
             control,
             text="Record Output Video",
             variable=self.recording_enabled,
             command=self._on_record_toggle
-        ).grid(row=7, column=0, columnspan=2, sticky="w")
+        ).grid(row=2, column=0, columnspan=2, sticky="w")
 
-        # Status bar at bottom
+        # Wildlife dataset section
+        ttk.Label(control, text="Wildlife Dataset", font=("Arial", 11, "bold")).grid(
+            row=3, column=0, columnspan=2, pady=(10, 5)
+        )
+
+        ttk.Button(
+            control,
+            text="Load Wildlife CSV",
+            command=self._on_load_data
+        ).grid(row=4, column=0, columnspan=2, sticky="ew")
+
+        # Species selection
+        ttk.Label(control, text="Species:").grid(row=5, column=0, sticky="w")
+        self.species_combo = ttk.Combobox(
+            control,
+            textvariable=self.species_var,
+            values=[],
+            state="readonly"
+        )
+        self.species_combo.grid(row=5, column=1, sticky="ew")
+
+        ttk.Button(
+            control,
+            text="Show Species Stats",
+            command=self._on_show_stats
+        ).grid(row=6, column=0, columnspan=2, sticky="ew", pady=5)
+
+        # Status bar
         self.status_label = ttk.Label(main_frame, text="Ready", anchor="w")
-        self.status_label.grid(row=8, column=0, columnspan=2, sticky="ew")
+        self.status_label.grid(row=21, column=0, columnspan=2, sticky="ew")
 
-    # ---------------------------------------------
-    # VIDEO SOURCE / RECORDING HELPERS
-    # ---------------------------------------------
-    def _open_source(self, source):
-        """
-        Open a new video source (camera index or file path).
-        Recreates VideoCapture and resets frame counters.
-        """
-        # Release old capture
-        if hasattr(self, "cap") and self.cap is not None:
-            self.cap.release()
+    # -------------------------------------------------------------
+    # Wildlife Dataset Functions
+    # -------------------------------------------------------------
+    def _on_load_data(self):
+        """Allow user to select a wildlife CSV file and load it."""
+        path = filedialog.askopenfilename(
+            title="Select wildlife CSV file",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+        if not path:
+            return
 
-        self.cap = cv2.VideoCapture(source)
-        if not self.cap.isOpened():
-            raise RuntimeError(f"Failed to open video source: {source}")
+        try:
+            # Load up to 3000 rows to keep performance reasonable
+            self.dataset = WildlifeDataset(path, max_rows=3000)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load dataset:\n{e}")
+            self.dataset = None
+            return
 
-        ret, frame = self.cap.read()
-        if not ret:
-            raise RuntimeError("Failed to read first frame from new source.")
+        # Populate species dropdown
+        species_list = self.dataset.get_species_list()
+        self.species_combo["values"] = species_list
 
-        self.frame_height, self.frame_width = frame.shape[:2]
+        if species_list:
+            self.species_var.set(species_list[0])
 
-        # Recreate detector and drone with new resolution
-       # self.detector = MotionDetector()
-       # self.drone = Drone(self.frame_width, self.frame_height)
+        self.status_label.config(text=f"Dataset loaded: {path}")
 
-        self.frame_id = 0
-        self.last_time = time.time()
+    def _on_show_stats(self):
+        """Display summary statistics for the selected species."""
+        if self.dataset is None:
+            messagebox.showinfo("Info", "Please load a wildlife dataset first.")
+            return
 
+        species = self.species_var.get().strip()
+        if not species:
+            messagebox.showinfo("Info", "Please select a species.")
+            return
+
+        num_obs, total_count = self.dataset.species_summary(species)
+
+        messagebox.showinfo(
+            "Species Statistics",
+            f"Species: {species}\n"
+            f"Observations: {num_obs}\n"
+            f"Total Count: {total_count}"
+        )
+
+    # -------------------------------------------------------------
+    # Video Source Handling
+    # -------------------------------------------------------------
     def _on_open_video(self):
-        """
-        Let user choose a video file and switch the input source to that file.
-        """
+        """Allow the user to select a video file as input."""
         path = filedialog.askopenfilename(
             title="Select video file",
             filetypes=[
@@ -197,212 +203,132 @@ class VisionDroneApp:
             ]
         )
         if not path:
-            return  # user cancelled
-
-        try:
-            self._open_source(path)
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to open video file:\n{e}")
-            # fall back to previous source
             return
 
-        self.source = path
+        # Release previous capture
+        if self.cap is not None:
+            self.cap.release()
+
+        # Open the selected file
+        self.cap = cv2.VideoCapture(path)
+        if not self.cap.isOpened():
+            messagebox.showerror("Error", "Failed to open video file.")
+            return
+
         self.source_is_file = True
         self.status_label.config(text=f"Using video file: {path}")
 
-    def _start_recording(self):
-        """
-        Ask for an output path and create a VideoWriter to record processed frames.
-        """
-        if self.video_writer is not None:
-            return  # already recording
+    # -------------------------------------------------------------
+    # Video Recording
+    # -------------------------------------------------------------
+    def _on_record_toggle(self):
+        """Start or stop video recording."""
+        if self.recording_enabled.get():
+            self._start_recording()
+        else:
+            self._stop_recording()
 
+    def _start_recording(self):
+        """Open a file dialog to select output video filename."""
         save_path = filedialog.asksaveasfilename(
-            title="Save output video as",
+            title="Save output video",
             defaultextension=".mp4",
-            filetypes=[("MP4 video", "*.mp4"), ("AVI video", "*.avi"), ("All files", "*.*")]
+            filetypes=[("MP4 files", "*.mp4"), ("AVI files", "*.avi")]
         )
         if not save_path:
-            # User cancelled → uncheck the box
             self.recording_enabled.set(False)
             return
 
-        # Try to get FPS from source; fall back to 30 if unknown
+        # Determine FPS
         fps = self.cap.get(cv2.CAP_PROP_FPS)
-        if fps is None or fps <= 0 or fps > 240:
+        if fps <= 0 or fps > 240:
             fps = 30.0
 
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         self.video_writer = cv2.VideoWriter(
-            save_path,
-            fourcc,
-            fps,
-            (self.frame_width, self.frame_height)
+            save_path, fourcc, fps, (self.frame_width, self.frame_height)
         )
 
         if not self.video_writer.isOpened():
             self.video_writer = None
             self.recording_enabled.set(False)
             messagebox.showerror("Error", "Failed to create output video file.")
-            return
-
-        self.status_label.config(text=f"Recording to: {save_path}")
+        else:
+            self.status_label.config(text=f"Recording to: {save_path}")
 
     def _stop_recording(self):
-        """Release VideoWriter and stop recording."""
+        """Stop recording and release writer."""
         if self.video_writer is not None:
             self.video_writer.release()
             self.video_writer = None
         self.status_label.config(text="Recording stopped.")
 
-    def _on_record_toggle(self):
-        """Handle Record Output Video checkbox state change."""
-        if self.recording_enabled.get():
-            self._start_recording()
-        else:
-            self._stop_recording()
-
-    # ---------------------------------------------
-    # CONTROL CALLBACKS
-    # ---------------------------------------------
-    def _on_start(self):
-        """Start updating and processing frames."""
-        self.running = True
-
-    def _on_stop(self):
-        """Pause the video processing loop."""
-        self.running = False
-
-    def _on_reset_drone(self):
-        """Reset drone back to the center of the frame."""
-        self.drone.reset_to_center()
-
-    def _on_sensitivity_change(self, _):
-        """Update motion detection sensitivity from GUI slider."""
-        self.detector.set_var_threshold(self.sensitivity_var.get())
-
-    def _on_min_area_change(self, _):
-        """Update minimum contour area from GUI slider."""
-        self.detector.set_min_area(self.min_area_var.get())
-
-    def _on_key_press(self, event):
-        """
-        Manual drone control using keyboard:
-        - W/A/S/D: move up/left/down/right
-        - Space: enter SAFE mode
-        """
-        if self.mode_var.get() != "MANUAL":
-            return
-
-        step = self.drone.step
-        key = event.keysym.lower()
-
-        if key == "w":
-            self.drone.move_manual(0, -step)
-        elif key == "s":
-            self.drone.move_manual(0, step)
-        elif key == "a":
-            self.drone.move_manual(-step, 0)
-        elif key == "d":
-            self.drone.move_manual(step, 0)
-        elif key == "space":
-            self.drone.mode = "SAFE"
-
-    # ---------------------------------------------
-    # MAIN UPDATE LOOP
-    # ---------------------------------------------
+    # -------------------------------------------------------------
+    # Main Loop
+    # -------------------------------------------------------------
     def _update_loop(self):
-        """Tkinter periodic callback to grab and process video frames."""
+        """Main GUI loop — reads frames and updates the display."""
         if self.running:
             ret, frame = self.cap.read()
 
-            # For video files, when we hit the end, ret becomes False
+            # If reading from file and end is reached
             if not ret:
                 if self.source_is_file:
-                    # Stop when the file ends
                     self.running = False
-                    self.status_label.config(text="End of video file.")
+                    self.status_label.config(text="Reached end of video file.")
                 else:
                     self.status_label.config(text="Camera read failed.")
                     self.running = False
             else:
                 self._process_frame(frame)
 
-        # Schedule the next update (in ~10 ms)
+        # Schedule next GUI update
         self.root.after(10, self._update_loop)
 
     def _process_frame(self, frame):
-        """Perform motion detection, update drone, and render to GUI."""
-        self.frame_id += 1
+        """Process each frame (detection & drone logic disabled)."""
 
-        # Run motion detection
-        boxes, mask = self.detector.detect(frame)
+        # -----------------------------------------------------
+        # MotionDetector / Drone logic temporarily removed:
+        # -----------------------------------------------------
+        # boxes, mask = self.detector.detect(frame)
+        # if boxes:
+        #     x, y, w, h = max(boxes, key=lambda b: b[2] * b[3])
+        #     target_center = (x + w // 2, y + h // 2)
+        # else:
+        #     target_center = None
+        #
+        # if self.drone.mode != "SAFE":
+        #     self.drone.mode = self.mode_var.get()
+        #
+        # if self.drone.mode == "AUTO":
+        #     self.drone.update_auto(target_center)
+        #
+        # self.drone.check_safety(margin=30)
+        #
+        # for (x, y, w, h) in boxes:
+        #     cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+        #
+        # cv2.drawMarker(frame, (self.drone.x, self.drone.y), (255, 0, 0),
+        #                cv2.MARKER_CROSS, 20, 2)
 
-        # Use the largest box as the tracking target (if any)
-        target_center = None
-        if boxes:
-            x, y, w, h = max(boxes, key=lambda b: b[2] * b[3])
-            target_center = (x + w // 2, y + h // 2)
-
-        # Update drone mode based on GUI selection (unless already SAFE)
-        if self.drone.mode != "SAFE":
-            self.drone.mode = self.mode_var.get()
-
-        # Auto-tracking behavior
-        if self.drone.mode == "AUTO":
-            self.drone.update_auto(target_center)
-
-        # Safety check: switch to SAFE if near edges
-        self.drone.check_safety(margin=30)
-
-        # Draw detection boxes
-        for (x, y, w, h) in boxes:
-            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-
-        # Draw drone marker as a blue cross
-        cv2.drawMarker(
-            frame,
-            (self.drone.x, self.drone.y),
-            (255, 0, 0),
-            cv2.MARKER_CROSS,
-            20,
-            2
-        )
-
-        # Compute FPS
-        now = time.time()
-        dt = now - self.last_time
-        self.fps = 1.0 / dt if dt > 0 else 0.0
-        self.last_time = now
-
-        # TODO: enable CSV logging after logger is implemented
-        # if self.logging_enabled.get():
-        #     self.logger.log(self.frame_id, boxes, self.drone)
-
-        # Write processed frame to video file if recording
+        # Write frame if recording
         if self.recording_enabled.get() and self.video_writer is not None:
             self.video_writer.write(frame)
 
-        # Convert frame (BGR -> RGB) for Tkinter display
+        # Convert to Tkinter image
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         img = Image.fromarray(rgb)
         imgtk = ImageTk.PhotoImage(image=img)
 
-        # Update Tkinter label with the new frame
         self.video_label.imgtk = imgtk
         self.video_label.configure(image=imgtk)
 
-        # Update status bar text
-        self.status_label.config(
-            text=f"Mode: {self.drone.mode} | Safe: {self.drone.safe} | "
-                 f"Detections: {len(boxes)} | FPS: {self.fps:.1f}"
-        )
-
-    # ---------------------------------------------
-    # CLEANUP
-    # ---------------------------------------------
+    # -------------------------------------------------------------
+    # Window Close
+    # -------------------------------------------------------------
     def _on_close(self):
-        """Handle window closing event: release resources and exit."""
+        """Release all resources and close the window."""
         self.running = False
 
         if self.cap is not None:
@@ -410,10 +336,6 @@ class VisionDroneApp:
 
         if self.video_writer is not None:
             self.video_writer.release()
-
-        # TODO: close logger once you actually create self.logger
-        # if hasattr(self, "logger"):
-        #     self.logger.close()
 
         self.root.destroy()
 
