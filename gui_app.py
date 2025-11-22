@@ -8,7 +8,7 @@ from PIL import Image, ImageTk
 # from detector import MotionDetector
 # from drone import Drone
 
-from wildlife_data import WildlifeDataset
+#from wildlife_data import WildlifeDataset
 # from logger import DetectionLogger   # Also disabled for now
 
 
