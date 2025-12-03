@@ -10,10 +10,10 @@ Features:
 - Save snapshots of the current frame
 - Display statistics (FPS, total frames, elapsed time, detections)
 - Optional CSV logging of detections and stats
+- Menu bar and keyboard shortcuts (Ctrl+O, Ctrl+S, Space)
 """
 
 import os
-import time
 import cv2
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -81,8 +81,12 @@ class VisionVideoApp:
         self.stats = StatsTracker()
         self.logger = DetectionLogger("wildlife_log.csv")
 
-        # Build GUI widgets
+        # Build GUI widgets and menu
         self._build_ui()
+        self._build_menu()
+
+        # Keyboard shortcuts
+        self._bind_shortcuts()
 
         # Close-window protocol
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -93,7 +97,7 @@ class VisionVideoApp:
     # ---------------------------------------------------------
     # GUI construction
     # ---------------------------------------------------------
-    def _build_ui(self):
+    def _build_ui(self) -> None:
         """Create and place all GUI widgets."""
         main_frame = ttk.Frame(self.root)
         main_frame.pack(fill="both", expand=True)
@@ -201,20 +205,66 @@ class VisionVideoApp:
         )
         status_bar.grid(row=20, column=0, columnspan=2, sticky="ew")
 
+    def _build_menu(self) -> None:
+        """Create top menu bar (File / Help)."""
+        menubar = tk.Menu(self.root)
+
+        # File menu
+        file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu.add_command(
+            label="Open Video...",
+            command=self._on_open_video,
+            accelerator="Ctrl+O",
+        )
+        file_menu.add_command(
+            label="Save Snapshot",
+            command=self._on_save_snapshot,
+            accelerator="Ctrl+S",
+        )
+        file_menu.add_separator()
+        file_menu.add_command(
+            label="Exit",
+            command=self._on_close,
+        )
+        menubar.add_cascade(label="File", menu=file_menu)
+
+        # Help menu
+        help_menu = tk.Menu(menubar, tearoff=0)
+        help_menu.add_command(label="About", command=self._show_about)
+        menubar.add_cascade(label="Help", menu=help_menu)
+
+        self.root.config(menu=menubar)
+
+    def _bind_shortcuts(self) -> None:
+        """Bind keyboard shortcuts for common actions."""
+        # Ctrl+O to open video file
+        self.root.bind("<Control-o>", lambda event: self._on_open_video())
+        # Ctrl+S to save snapshot
+        self.root.bind("<Control-s>", lambda event: self._on_save_snapshot())
+        # Space to toggle start/stop
+        self.root.bind("<space>", self._on_space_toggle)
+
     # ---------------------------------------------------------
     # Control callbacks
     # ---------------------------------------------------------
-    def _on_start(self):
+    def _on_start(self) -> None:
         """Resume the video update loop."""
         self.running = True
         self.status_var.set("Running")
 
-    def _on_stop(self):
+    def _on_stop(self) -> None:
         """Pause the video update loop."""
         self.running = False
         self.status_var.set("Paused")
 
-    def _on_open_video(self):
+    def _on_space_toggle(self, _event) -> None:
+        """Toggle between running and paused using the space bar."""
+        if self.running:
+            self._on_stop()
+        else:
+            self._on_start()
+
+    def _on_open_video(self) -> None:
         """Ask user for a video file and open it as the new source."""
         path = filedialog.askopenfilename(
             title="Select video file",
@@ -249,14 +299,14 @@ class VisionVideoApp:
         self.source_is_file = True
         self.status_var.set(f"Using video file: {path}")
 
-    def _on_record_toggle(self):
+    def _on_record_toggle(self) -> None:
         """Start or stop recording based on the checkbox state."""
         if self.recording_enabled.get():
             self._start_recording()
         else:
             self._stop_recording()
 
-    def _start_recording(self):
+    def _start_recording(self) -> None:
         """Create a VideoWriter for exporting the processed video."""
         save_path = filedialog.asksaveasfilename(
             title="Save output video",
@@ -288,22 +338,22 @@ class VisionVideoApp:
 
         self.status_var.set(f"Recording to: {save_path}")
 
-    def _stop_recording(self):
+    def _stop_recording(self) -> None:
         """Stop recording and release the VideoWriter."""
         if self.video_writer is not None:
             self.video_writer.release()
             self.video_writer = None
         self.status_var.set("Recording stopped")
 
-    def _on_min_area_change(self, _):
+    def _on_min_area_change(self, _event) -> None:
         """Update detector's minimum area from the scale widget."""
         self.detector.set_min_area(self.min_area_var.get())
 
-    def _on_filter_change(self, _event):
+    def _on_filter_change(self, _event) -> None:
         """Update the current filter mode from the combobox."""
         self.filter_mgr.set_mode(self.filter_var.get())
 
-    def _on_save_snapshot(self):
+    def _on_save_snapshot(self) -> None:
         """Save the last processed frame to the 'snapshots' folder."""
         if self.last_output_frame is None:
             messagebox.showinfo("Info", "No frame available to save yet.")
@@ -315,10 +365,24 @@ class VisionVideoApp:
         cv2.imwrite(filename, self.last_output_frame)
         self.status_var.set(f"Snapshot saved: {filename}")
 
+    def _show_about(self) -> None:
+        """Show a simple About dialog with project information."""
+        message = (
+            "VisionDrone: Intelligent Tracking System\n\n"
+            "Wildlife Drone Monitoring Demo\n"
+            "Developed by: Zhelin Zheng & Jingxuan Zhu\n\n"
+            "Features:\n"
+            "- Video import/export\n"
+            "- Wildlife-style motion detection\n"
+            "- Image filters and statistics\n"
+            "- CSV logging and snapshots"
+        )
+        messagebox.showinfo("About", message)
+
     # ---------------------------------------------------------
     # Main loop and processing
     # ---------------------------------------------------------
-    def _update_loop(self):
+    def _update_loop(self) -> None:
         """Main periodic update loop scheduled with root.after()."""
         if self.running:
             ret, frame = self.cap.read()
@@ -335,7 +399,7 @@ class VisionVideoApp:
 
         self.root.after(10, self._update_loop)
 
-    def _process_frame(self, frame):
+    def _process_frame(self, frame) -> None:
         """
         Process a single frame:
         - Update statistics
@@ -360,12 +424,8 @@ class VisionVideoApp:
             # Get all detected boxes from the detector
             boxes = self.detector.detect(frame)
 
-            # IMPORTANT:
-            # Instead of drawing ALL boxes (many small fragments),
-            # we only keep the largest one. This is more suitable
-            # when there is a single main moving object (e.g., one animal).
+            # Only draw the largest box to avoid many small rectangles
             if boxes:
-                # Select the largest bounding box by area (w * h)
                 largest_box = max(boxes, key=lambda b: b[2] * b[3])
                 boxes_to_draw = [largest_box]
             else:
@@ -418,7 +478,7 @@ class VisionVideoApp:
     # ---------------------------------------------------------
     # Cleanup
     # ---------------------------------------------------------
-    def _on_close(self):
+    def _on_close(self) -> None:
         """Release resources and close the window."""
         self.running = False
 
@@ -433,7 +493,7 @@ class VisionVideoApp:
 
         self.root.destroy()
 
-    def run(self):
+    def run(self) -> None:
         """Start Tkinter main loop."""
         self.root.mainloop()
 
