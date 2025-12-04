@@ -1,43 +1,44 @@
 # heatmap.py
-"""
-Simple heatmap generator that accumulates animal positions
-and renders a heatmap image.
-"""
-
+import os
 import numpy as np
 import cv2
-import os
 
 class HeatmapGenerator:
     def __init__(self, width, height):
         self.width = width
         self.height = height
-        self.grid = np.zeros((height, width), dtype=np.float32)
+        # accumulation map
+        self.map = np.zeros((height, width), dtype=np.float32)
 
-    def add_point(self, box):
-        """Accumulate heat at animal center."""
-        if box is None:
-            return
+    def add_point(self, bbox):
+        """
+        Add one detection to the heatmap.
+        bbox: (x, y, w, h)
+        """
+        x, y, w, h = bbox
+        cx = int(x + w / 2)
+        cy = int(y + h / 2)
 
-        x, y, w, h = box
-        cx, cy = x + w // 2, y + h // 2
+        # clamp to valid range
+        cx = max(0, min(self.width - 1, cx))
+        cy = max(0, min(self.height - 1, cy))
 
-        # clamp indices
-        cx = min(max(cx, 0), self.width - 1)
-        cy = min(max(cy, 0), self.height - 1)
+        self.map[cy, cx] += 1.0
 
-        # increase heat
-        self.grid[cy, cx] += 1
+    def save_heatmap(self, out_path="heatmap/heatmap.png"):
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
-    def save_heatmap(self, path="heatmap.png"):
-        """Convert grid to heatmap and save as PNG."""
-        if not os.path.exists("results"):
-            os.makedirs("results")
+        if self.map.max() <= 0:
+            # no data collected -> generate empty heatmap
+            base = np.zeros_like(self.map, dtype=np.uint8)
+        else:
+            # optional blur to spread the points (looks better)
+            blurred = cv2.GaussianBlur(self.map, (0, 0), sigmaX=15, sigmaY=15)
 
-        heat = self.grid.copy()
-        heat = cv2.normalize(heat, None, 0, 255, cv2.NORM_MINMAX)
-        heat = heat.astype("uint8")
+            # normalize to 0–255
+            norm = cv2.normalize(blurred, None, 0, 255, cv2.NORM_MINMAX)
+            base = norm.astype("uint8")
 
-        heatmap = cv2.applyColorMap(heat, cv2.COLORMAP_JET)
-        cv2.imwrite(os.path.join("results", path), heatmap)
-        return os.path.join("results", path)
+        heat = cv2.applyColorMap(base, cv2.COLORMAP_JET)
+        cv2.imwrite(out_path, heat)
+        return out_path

@@ -16,18 +16,6 @@ class BehaviorAnalyzer:
     def analyze(self, box, frame_width, frame_height):
         """
         Analyze movement and behavior characteristics.
-
-        Args:
-            box: (x, y, w, h)
-            frame_width: video width
-            frame_height: video height
-
-        Returns:
-            dict: {
-                "movement": float,
-                "is_near_border": bool,
-                "status": str
-            }
         """
         if box is None:
             self.last_center = None

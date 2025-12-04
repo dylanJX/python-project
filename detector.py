@@ -9,7 +9,7 @@ This module provides a WildlifeDetector class that:
 """
 
 import cv2
-import numpy as np
+#import numpy as np
 
 
 class WildlifeDetector:

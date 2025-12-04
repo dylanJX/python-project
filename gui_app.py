@@ -1,8 +1,6 @@
 # gui_app.py
 """
-Python course project: Wildlife Drone Monitoring GUI.
-
-This program:
+This app:
 - opens a camera or video file,
 - runs simple motion-based wildlife detection,
 - allows basic image filters,
@@ -23,7 +21,7 @@ from detector import WildlifeDetector
 from image_filters import FrameFilter
 from stats import StatsTracker
 from logger import DetectionLogger
-from classifier import classify           # renamed from fake_classify
+from classifier import classify
 from behavior import BehaviorAnalyzer
 from heatmap import HeatmapGenerator
 

@@ -3,9 +3,7 @@
 Animal classification module.
 
 This module provides a simple rule-based classifier that assigns
-a species label and a confidence score based on bounding-box size.
-
-It is designed for demonstration inside the wildlife monitoring GUI.
+a species label based on bounding-box size.
 """
 
 import random
@@ -22,21 +20,6 @@ SPECIES = [
 ]
 
 def classify(bbox):
-    """
-    Return a species label and confidence score for the given bounding box.
-
-    Parameters
-    ----------
-    bbox : tuple (x, y, w, h)
-        Bounding box for the detected animal.
-
-    Returns
-    -------
-    species : str
-        Species name selected from predefined list.
-    confidence : float
-        Confidence score in range 0.60–0.98.
-    """
     x, y, w, h = bbox
     area = w * h
 
