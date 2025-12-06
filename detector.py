@@ -1,91 +1,119 @@
 # detector.py
 """
-Wildlife-like motion detector using background subtraction.
+YOLO-based object detector.
 
-This module provides a WildlifeDetector class that:
-- Maintains an internal background model (MOG2)
-- Detects moving regions as potential "wildlife activity"
-- Returns bounding boxes for detected objects
+Replaces the old background-subtraction WildlifeDetector with a detector
+that uses a YOLO model to find objects in each frame.
+
+The detector returns a list of detection dictionaries, each with:
+    - box: (x, y, w, h)  integer pixel coordinates
+    - label: str         class name (e.g. "bird", "person")
+    - conf: float        confidence between 0 and 1
 """
 
+from typing import List, Dict, Tuple, Optional
+
 import cv2
-#import numpy as np
+from ultralytics import YOLO
+
+
+BBox = Tuple[int, int, int, int]
 
 
 class WildlifeDetector:
     """
-    Detect moving objects (e.g., animals) using background subtraction.
+    YOLO-based object detector.
+
+    Parameters
+    ----------
+    model_path : str
+        Path to a YOLO model file, e.g. "yolov8n.pt".
+    conf_threshold : float
+        Minimum confidence required to keep a detection.
+    classes : Optional[list[int]]
+        Optional list of class IDs to keep. If None, all classes are allowed.
+    min_area : int
+        Optional area filter in pixels^2. Detections with box area smaller
+        than this value are discarded.
     """
 
-    def __init__(self, history: int = 500, var_threshold: int = 40,
-                 min_area: int = 1500, detect_shadows: bool = True):
+    def __init__(
+        self,
+        min_area: int = 0,
+        model_path: str = "yolov8n.pt",
+        conf_threshold: float = 0.3,
+        classes: Optional[list] = None,
+    ) -> None:
+        self.model = YOLO(model_path)
+        self.conf_threshold = conf_threshold
+        self.classes = classes
+        self.min_area = int(min_area) if min_area is not None else 0
+
+    # ------------------------------------------------------------------
+    def detect(self, frame) -> List[Dict]:
         """
-        :param history: How many frames the background model remembers.
-        :param var_threshold: Sensitivity threshold (lower is more sensitive).
-        :param min_area: Minimum contour area to be considered a detection.
-        :param detect_shadows: Whether to let MOG2 model shadows.
+        Run YOLO on the given BGR frame and return a list of detections.
+
+        Parameters
+        ----------
+        frame : np.ndarray
+            BGR image as returned by OpenCV.
+
+        Returns
+        -------
+        list of dict
+            Each dict has keys:
+                - "box": (x, y, w, h)
+                - "label": str
+                - "conf": float
         """
-        self.history = history
-        self.var_threshold = var_threshold
-        self.min_area = min_area
+        detections: List[Dict] = []
 
-        self._subtractor = cv2.createBackgroundSubtractorMOG2(
-            history=self.history,
-            varThreshold=self.var_threshold,
-            detectShadows=detect_shadows
-        )
-        self._kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        # Ultralytics YOLO accepts BGR directly.
+        results = self.model(frame, verbose=False)
+        if not results:
+            return detections
 
-    def set_min_area(self, min_area: int) -> None:
-        """Update the minimum contour area."""
-        self.min_area = max(0, int(min_area))
+        result = results[0]
+        if result.boxes is None or len(result.boxes) == 0:
+            return detections
 
-    def set_sensitivity(self, var_threshold: int) -> None:
-        """
-        Update the sensitivity (varThreshold).
-        Recreate the background subtractor with the new parameter.
-        """
-        self.var_threshold = max(1, int(var_threshold))
-        self._subtractor = cv2.createBackgroundSubtractorMOG2(
-            history=self.history,
-            varThreshold=self.var_threshold,
-            detectShadows=True
-        )
+        names = result.names  # mapping from class id to string label
 
-    def reset_model(self) -> None:
-        """Reset the background model."""
-        self._subtractor = cv2.createBackgroundSubtractorMOG2(
-            history=self.history,
-            varThreshold=self.var_threshold,
-            detectShadows=True
-        )
+        for box in result.boxes:
+            conf = float(box.conf[0])
+            cls_id = int(box.cls[0])
 
-    def detect(self, frame):
-        """
-        Run motion detection on a single BGR frame.
-
-        :param frame: Input BGR frame (numpy array).
-        :return: List of bounding boxes [(x, y, w, h), ...]
-        """
-        # Apply background subtraction
-        fgmask = self._subtractor.apply(frame)
-
-        # Remove shadows (in MOG2 shadows are usually ~127)
-        _, thresh = cv2.threshold(fgmask, 200, 255, cv2.THRESH_BINARY)
-
-        # Morphological operations to clean noise
-        cleaned = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, self._kernel, iterations=1)
-        cleaned = cv2.dilate(cleaned, self._kernel, iterations=2)
-
-        # Find contours
-        contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        boxes = []
-        for cnt in contours:
-            area = cv2.contourArea(cnt)
-            if area < self.min_area:
+            if conf < self.conf_threshold:
                 continue
-            x, y, w, h = cv2.boundingRect(cnt)
-            boxes.append((x, y, w, h))
+            if self.classes is not None and cls_id not in self.classes:
+                continue
 
-        return boxes
+            # xyxy format: (x1, y1, x2, y2)
+            x1, y1, x2, y2 = box.xyxy[0].tolist()
+            x1_i, y1_i, x2_i, y2_i = int(x1), int(y1), int(x2), int(y2)
+
+            w = max(0, x2_i - x1_i)
+            h = max(0, y2_i - y1_i)
+
+            # Optional area filter (keeps compatibility with GUI slider)
+            area = w * h
+            if self.min_area > 0 and area < self.min_area:
+                continue
+
+            label = names.get(cls_id, f"id_{cls_id}")
+
+            detections.append(
+                {
+                    "box": (x1_i, y1_i, w, h),
+                    "label": label,
+                    "conf": conf,
+                }
+            )
+
+        return detections
+
+    # ------------------------------------------------------------------
+    def set_min_area(self, value: int) -> None:
+        """Update the minimum area threshold."""
+        self.min_area = int(value)
