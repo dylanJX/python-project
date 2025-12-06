@@ -52,17 +52,20 @@ class VisionVideoApp:
         self.running = False
         self.detection_enabled = tk.BooleanVar(value=True)
         self.filter_var = tk.StringVar(value="None")
-        self.min_area_var = tk.IntVar(value=0)  # used as extra area filter for YOLO boxes
+        # used as extra area filter for YOLO boxes
+        self.min_area_var = tk.IntVar(value=0)
+        # toggle whether using detection filter
+        self.use_detection_filter = tk.BooleanVar(value=True)
 
         # Statistics and logging
         self.stats = StatsTracker()
         self.logger = DetectionLogger("wildlife_log.csv")
 
-        # Frame geometry (initialized after opening source)
+        # Frame geometry
         self.frame_width = 640
         self.frame_height = 480
 
-        # Core modules (initialized once we know frame size)
+        # Core modules
         self.detector = None
         self.filter_mgr = FrameFilter(self.filter_var.get())
         self.behavior = BehaviorAnalyzer()
@@ -147,6 +150,13 @@ class VisionVideoApp:
             text="Enable Detection",
             variable=self.detection_enabled,
         ).grid(row=3, column=0, columnspan=2, sticky="w")
+
+
+        ttk.Checkbutton(
+            control,
+            text="Use Kalman detection filter",
+            variable=self.use_detection_filter,
+        ).grid(row=3, column=0, columnspan=2, sticky="e", padx=(0, 5))
 
         # Filter selection
         ttk.Label(control, text="Filter:").grid(row=4, column=0, sticky="w", pady=(8, 0))
@@ -310,8 +320,8 @@ class VisionVideoApp:
             self.frame_width,
             self.frame_height,
             max_distance=150.0,  # allow bigger jumps between frames
-            max_missed=20,  # tolerate short YOLO dropouts
-            min_iou=0.2,  # require some overlap
+            max_missed=20,       # tolerate short YOLO dropouts
+            min_iou=0.2,         # require some overlap
         )
 
         # Reset stats and frame index
@@ -352,8 +362,15 @@ class VisionVideoApp:
         self.root.after(20, self._update_loop)
 
     def _process_frame(self, frame):
-        """Run detection, tracking, overlays and display for one frame."""
-        # Ensure modules exist for unexpected sources
+        """
+        Process a single video frame:
+        - Run YOLO detection.
+        - Optionally run Kalman filter–based multi-object tracking.
+        - Draw bounding boxes and labels.
+        - Update statistics, heatmap, logger, and GUI display.
+        """
+
+        # Ensure core modules exist (happens when switching video source)
         if self.detector is None or self.heatmap is None or self.tracker is None:
             self.detector = WildlifeDetector(
                 min_area=self.min_area_var.get(),
@@ -364,107 +381,144 @@ class VisionVideoApp:
             self.tracker = ObjectTracker(
                 self.frame_width,
                 self.frame_height,
-                max_distance=150.0,  # allow bigger jumps between frames
-                max_missed=20,  # tolerate short YOLO dropouts
-                min_iou=0.2,  # require some overlap
+                max_distance=150.0,
+                max_missed=20,
+                min_iou=0.2,
             )
 
-        # Apply optional filter
+        # Apply optional GUI-selected frame filters (Blur / Grayscale / Edge)
         frame = self.filter_mgr.apply(frame)
 
         detection_count = 0
 
+        # ---------------------------------------------------------
+        # YOLO detection + optional Kalman tracking
+        # ---------------------------------------------------------
         if self.detection_enabled.get():
-            detections = self.detector.detect(frame)  # list of {"box","label","conf"}
 
-            if detections:
-                boxes = [d["box"] for d in detections]
-                tracks = self.tracker.update(boxes, self.frame_index)
-                detection_count = len(tracks)
+            # Always run YOLO first
+            detections = self.detector.detect(frame)
 
-                # For each track, find nearest detection to reuse YOLO label/conf
-                for track in tracks:
-                    box = track["box"]
-                    track_id = track["id"]
-                    x, y, w, h = box
+            # =====================================================
+            # CASE 1: "Use detection filter" enabled → use Kalman tracker
+            # =====================================================
+            if self.use_detection_filter.get():
 
-                    # Center of track box
-                    tcx = x + w / 2.0
-                    tcy = y + h / 2.0
+                if detections:
+                    # Extract plain bounding boxes from YOLO detections
+                    boxes = [d["box"] for d in detections]
 
-                    best_det = None
-                    best_dist = float("inf")
-                    for det in detections:
-                        dx, dy, dw, dh = det["box"]
-                        dcx = dx + dw / 2.0
-                        dcy = dy + dh / 2.0
-                        d2 = (dcx - tcx) ** 2 + (dcy - tcy) ** 2
-                        if d2 < best_dist:
-                            best_dist = d2
-                            best_det = det
+                    # Update the Kalman tracker (predict + match + update)
+                    tracks = self.tracker.update(boxes, self.frame_index)
+                    detection_count = len(tracks)
 
-                    if best_det is not None:
-                        label = best_det["label"]
-                        conf = best_det["conf"]
-                    else:
-                        label = "object"
-                        conf = 0.0
+                    # Assign YOLO labels/confidence back to each track
+                    for track in tracks:
+                        box = track["box"]
+                        track_id = track["id"]
+                        x, y, w, h = box
 
-                    # Behavior analysis (still uses box + frame size)
-                    behavior_info = self.behavior.analyze(
-                        box, self.frame_width, self.frame_height
-                    )
-                    behavior_text = behavior_info["status"]
+                        # Compute track center for matching
+                        tcx = x + w / 2.0
+                        tcy = y + h / 2.0
 
-                    # Heatmap accumulation
-                    self.heatmap.add_point(box)
+                        # Find nearest YOLO detection to recover label/conf
+                        best_det = None
+                        best_dist = float("inf")
+                        for det in detections:
+                            dx, dy, dw, dh = det["box"]
+                            dcx = dx + dw / 2.0
+                            dcy = dy + dh / 2.0
+                            dist2 = (dcx - tcx) ** 2 + (dcy - tcy) ** 2
+                            if dist2 < best_dist:
+                                best_dist = dist2
+                                best_det = det
 
-                    # Draw detection box
-                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                        # Track inherits YOLO label/confidence
+                        if best_det is not None:
+                            label = best_det["label"]
+                            conf = best_det["conf"]
+                        else:
+                            label = "object"
+                            conf = 0.0
 
-                    # Draw ID + YOLO label
-                    text_label = f"ID {track_id} - {label} ({conf:.2f})"
-                    cv2.putText(
-                        frame,
-                        text_label,
-                        (x, max(0, y - 8)),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5,
-                        (0, 255, 0),
-                        1,
-                    )
+                        # Add detection point to heatmap
+                        self.heatmap.add_point(box)
 
-                    # Behavior text below the box
-                    cv2.putText(
-                        frame,
-                        behavior_text,
-                        (x, y + h + 20),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5,
-                        (255, 255, 0),
-                        1,
-                    )
+                        # Draw the tracked bounding box
+                        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+
+                        # Display ID + label + confidence
+                        cv2.putText(
+                            frame,
+                            f"ID {track_id} - {label} ({conf:.2f})",
+                            (x, max(0, y - 8)),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.5,
+                            (0, 255, 0),
+                            1,
+                        )
+
+                else:
+                    # No YOLO detections this frame → tracker only performs prediction
+                    self.tracker.update([], self.frame_index)
+                    detection_count = 0
+
+            # =====================================================
+            # CASE 2: "Use detection filter" disabled → YOLO only
+            # No Kalman filtering, no tracking IDs.
+            # =====================================================
             else:
-                # No detections this frame: still age tracks
-                self.tracker.update([], self.frame_index)
-        else:
-            # Detection disabled, no new info for tracker
-            self.tracker.update([], self.frame_index)
 
-        # Update statistics
+                if detections:
+                    detection_count = len(detections)
+
+                    # Directly draw YOLO detections without tracking
+                    for det in detections:
+                        x, y, w, h = det["box"]
+                        label = det["label"]
+                        conf = det["conf"]
+
+                        # Heatmap uses raw YOLO box
+                        self.heatmap.add_point((x, y, w, h))
+
+                        # Draw YOLO box
+                        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+
+                        # Draw label (no ID here)
+                        cv2.putText(
+                            frame,
+                            f"{label} ({conf:.2f})",
+                            (x, max(0, y - 8)),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.5,
+                            (0, 255, 0),
+                            1,
+                        )
+                else:
+                    detection_count = 0
+                    # YOLO-only mode ignores tracker entirely
+
+        else:
+            # Detection completely disabled → no YOLO, no tracking
+            detection_count = 0
+
+        # ---------------------------------------------------------
+        # Update side-panel statistics
+        # ---------------------------------------------------------
         self.stats.update()
         self.fps_var.set(f"FPS: {self.stats.fps:.2f}")
         self.frame_var.set(f"Frames: {self.frame_index}")
         self.elapsed_var.set(f"Elapsed: {self.stats.elapsed:.1f} s")
         self.detection_var.set(f"Detections: {detection_count}")
 
-        # Recording
+        # Handle optional video recording
         self._handle_recording(frame)
 
-        # Keep last processed frame for snapshots
+        # Save last displayed frame for snapshot
         self.last_output_frame = frame.copy()
 
-        # Logging
+        # Log detection statistics to CSV
         if self.logger is not None:
             self.logger.log(
                 frame_index=self.frame_index,
@@ -473,7 +527,7 @@ class VisionVideoApp:
                 elapsed=self.stats.elapsed,
             )
 
-        # Display in GUI
+        # Display in GUI window
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         img = ImageTk.PhotoImage(Image.fromarray(rgb))
         self.video_label.imgtk = img

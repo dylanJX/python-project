@@ -2,39 +2,22 @@
 """
 YOLO-based object detector.
 
-Replaces the old background-subtraction WildlifeDetector with a detector
-that uses a YOLO model to find objects in each frame.
-
-The detector returns a list of detection dictionaries, each with:
-    - box: (x, y, w, h)  integer pixel coordinates
-    - label: str         class name (e.g. "bird", "person")
-    - conf: float        confidence between 0 and 1
+Supports:
+- Raw YOLO detection (detect_raw)
+- Filtered detection for teammate to modify (detect_filtered)
+- Legacy detect() function for backward compatibility
 """
 
 from typing import List, Dict, Tuple, Optional
-
 import cv2
 from ultralytics import YOLO
-
 
 BBox = Tuple[int, int, int, int]
 
 
 class WildlifeDetector:
     """
-    YOLO-based object detector.
-
-    Parameters
-    ----------
-    model_path : str
-        Path to a YOLO model file, e.g. "yolov8n.pt".
-    conf_threshold : float
-        Minimum confidence required to keep a detection.
-    classes : Optional[list[int]]
-        Optional list of class IDs to keep. If None, all classes are allowed.
-    min_area : int
-        Optional area filter in pixels^2. Detections with box area smaller
-        than this value are discarded.
+    YOLO-based object detector with support for raw and filtered pipelines.
     """
 
     def __init__(
@@ -49,36 +32,16 @@ class WildlifeDetector:
         self.classes = classes
         self.min_area = int(min_area) if min_area is not None else 0
 
-    # ------------------------------------------------------------------
-    def detect(self, frame) -> List[Dict]:
-        """
-        Run YOLO on the given BGR frame and return a list of detections.
+    # -------------------------------------------------------------
+    # Shared YOLO → detection dictionary parser
+    # -------------------------------------------------------------
+    def _parse_yolo_output(self, result):
+        detections = []
 
-        Parameters
-        ----------
-        frame : np.ndarray
-            BGR image as returned by OpenCV.
-
-        Returns
-        -------
-        list of dict
-            Each dict has keys:
-                - "box": (x, y, w, h)
-                - "label": str
-                - "conf": float
-        """
-        detections: List[Dict] = []
-
-        # Ultralytics YOLO accepts BGR directly.
-        results = self.model(frame, verbose=False)
-        if not results:
-            return detections
-
-        result = results[0]
         if result.boxes is None or len(result.boxes) == 0:
             return detections
 
-        names = result.names  # mapping from class id to string label
+        names = result.names
 
         for box in result.boxes:
             conf = float(box.conf[0])
@@ -89,31 +52,55 @@ class WildlifeDetector:
             if self.classes is not None and cls_id not in self.classes:
                 continue
 
-            # xyxy format: (x1, y1, x2, y2)
             x1, y1, x2, y2 = box.xyxy[0].tolist()
-            x1_i, y1_i, x2_i, y2_i = int(x1), int(y1), int(x2), int(y2)
+            x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
 
-            w = max(0, x2_i - x1_i)
-            h = max(0, y2_i - y1_i)
+            w = max(0, x2 - x1)
+            h = max(0, y2 - y1)
 
-            # Optional area filter (keeps compatibility with GUI slider)
-            area = w * h
-            if self.min_area > 0 and area < self.min_area:
+            # Integrate your min_area filtering logic
+            if self.min_area > 0 and (w * h) < self.min_area:
                 continue
-
-            label = names.get(cls_id, f"id_{cls_id}")
 
             detections.append(
                 {
-                    "box": (x1_i, y1_i, w, h),
-                    "label": label,
+                    "box": (x1, y1, w, h),
+                    "label": names.get(cls_id, f"id_{cls_id}"),
                     "conf": conf,
                 }
             )
 
         return detections
 
-    # ------------------------------------------------------------------
+    # -------------------------------------------------------------
+    # RAW YOLO detection
+    # -------------------------------------------------------------
+    def detect_raw(self, frame) -> List[Dict]:
+        """
+        Pure YOLO detection.
+        """
+        results = self.model(frame, verbose=False)
+        if not results:
+            return []
+        return self._parse_yolo_output(results[0])
+
+    def detect_filtered(self, frame) -> List[Dict]:
+        """
+        Run YOLO first, then allow custom filtering logic.
+        Currently same as raw version.
+        """
+
+        detections = self.detect_raw(frame)
+
+        return detections
+
+    # -------------------------------------------------------------
+    # Legacy detect() = alias for raw
+    # -------------------------------------------------------------
+    def detect(self, frame) -> List[Dict]:
+        """Backward compatibility: same as raw YOLO."""
+        return self.detect_raw(frame)
+
+    # -------------------------------------------------------------
     def set_min_area(self, value: int) -> None:
-        """Update the minimum area threshold."""
         self.min_area = int(value)
