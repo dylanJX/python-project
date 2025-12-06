@@ -90,6 +90,13 @@ class VisionVideoApp:
         self._bind_shortcuts()
         self.root.after(30, self._update_loop)
 
+        # Internal bookkeeping
+        self.frame_index = 0
+        self.last_output_frame = None
+
+        # ID counter used only in pure YOLO mode (no tracking)
+        self.simple_yolo_id = 1
+
     # ------------------------------------------------------------------
     # UI construction
     # ------------------------------------------------------------------
@@ -255,6 +262,9 @@ class VisionVideoApp:
     def _on_start(self):
         self.running = True
         self.status_var.set("Running")
+        # Reset simple YOLO ID counter when starting in pure YOLO mode
+        if not self.use_detection_filter.get():
+            self.simple_yolo_id = 1
 
     def _on_stop(self):
         self.running = False
@@ -325,6 +335,9 @@ class VisionVideoApp:
         )
 
         # Reset stats and frame index
+        self.stats = StatsTracker()
+        self.frame_index = 0
+        self.simple_yolo_id = 1  # reset pure YOLO ID counter
         self.stats = StatsTracker()
         self.frame_index = 0
 
@@ -479,16 +492,20 @@ class VisionVideoApp:
                         label = det["label"]
                         conf = det["conf"]
 
+                        # Assign a simple global ID (no temporal tracking)
+                        det_id = self.simple_yolo_id
+                        self.simple_yolo_id += 1
+
                         # Heatmap uses raw YOLO box
                         self.heatmap.add_point((x, y, w, h))
 
                         # Draw YOLO box
                         cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
-                        # Draw label (no ID here)
+                        # Draw label with non-persistent ID
                         cv2.putText(
                             frame,
-                            f"{label} ({conf:.2f})",
+                            f"ID {det_id} - {label} ({conf:.2f})",
                             (x, max(0, y - 8)),
                             cv2.FONT_HERSHEY_SIMPLEX,
                             0.5,
@@ -498,10 +515,6 @@ class VisionVideoApp:
                 else:
                     detection_count = 0
                     # YOLO-only mode ignores tracker entirely
-
-        else:
-            # Detection completely disabled → no YOLO, no tracking
-            detection_count = 0
 
         # ---------------------------------------------------------
         # Update side-panel statistics
