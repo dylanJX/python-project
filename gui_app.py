@@ -418,9 +418,17 @@ class VisionVideoApp:
                         track_id = track["id"]
                         x, y, w, h = box
 
+<<<<<<< HEAD
                         # Compute track center for matching
                         tcx = x + w / 2.0
                         tcy = y + h / 2.0
+=======
+                    # Behavior analysis (still uses box + frame size)
+                    behavior_info = self.behavior.analyze(
+                        track, self.frame_width, self.frame_height
+                    )
+                    behavior_text = behavior_info["status"]
+>>>>>>> 354d74862677c4aa47346721953017b0797891a5
 
                         # Find nearest YOLO detection to recover label/conf
                         best_det = None
