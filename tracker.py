@@ -215,16 +215,25 @@ class ObjectTracker:
             active_track_ids.add(new_id)
 
         # Build list of active tracks for this frame (those with a detection now)
+        # Build list of active tracks for this frame (those with a detection now)
         active_tracks = []
         for track_id in active_track_ids:
             t = self._tracks.get(track_id)
             if t is None:
                 continue
+
+            # Return a rich view of the track so behavior analysis
+            # can use velocity, last_center, etc.
             active_tracks.append(
                 {
                     "id": t["id"],
                     "box": t["box"],
                     "center": t["center"],
+                    "last_center": t.get("last_center"),
+                    "kf_state": t.get("kf_state"),
+                    "path_length": t.get("path_length", 0.0),
+                    "first_frame": t.get("first_frame"),
+                    "last_frame": t.get("last_frame"),
                 }
             )
 
