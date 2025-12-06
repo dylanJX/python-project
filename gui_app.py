@@ -94,10 +94,13 @@ class VisionVideoApp:
         self.frame_index = 0
         self.last_output_frame = None
 
-        # ID counter used only in pure YOLO mode (no tracking)
-        self.simple_yolo_id = 1
+        self.display_id_map = {}
+        self.free_display_ids = []
+        self.display_id_map = {}  # track_id -> display_id
+        self.free_display_ids = []  # recycled display IDs
+        self.next_display_id = 1
 
-    # ------------------------------------------------------------------
+        # ------------------------------------------------------------------
     # UI construction
     # ------------------------------------------------------------------
     def _build_ui(self):
@@ -163,6 +166,7 @@ class VisionVideoApp:
             control,
             text="Use Kalman detection filter",
             variable=self.use_detection_filter,
+            command=self._on_kalman_toggle,
         ).grid(row=3, column=0, columnspan=2, sticky="e", padx=(0, 5))
 
         # Filter selection
@@ -262,13 +266,25 @@ class VisionVideoApp:
     def _on_start(self):
         self.running = True
         self.status_var.set("Running")
-        # Reset simple YOLO ID counter when starting in pure YOLO mode
-        if not self.use_detection_filter.get():
-            self.simple_yolo_id = 1
+
+        # Reset tracker IDs and tracks at the beginning of a run
+        if self.tracker is not None:
+            self.tracker.reset()
+
+        # Also reset display ID mapping used in KF mode
+        self.display_id_map.clear()
+        self.free_display_ids.clear()
+        self.next_display_id = 1
 
     def _on_stop(self):
         self.running = False
         self.status_var.set("Paused")
+
+    def _reset_display_ids(self):
+        self.display_id_map = {}
+        self.free_display_ids = []
+        self.next_display_id = 1
+
 
     def _on_space_toggle(self, _event):
         if self.running:
@@ -283,6 +299,19 @@ class VisionVideoApp:
     def _on_min_area_change(self, value):
         if self.detector is not None:
             self.detector.set_min_area(int(value))
+
+    def _on_kalman_toggle(self):
+        if self.tracker is not None:
+            self.tracker.reset()
+
+        self._reset_display_ids()
+        self.stats = StatsTracker()
+        self.frame_index = 0
+
+        if self.use_detection_filter.get():
+            self.status_var.set("Switched to Kalman + tracking mode")
+        else:
+            self.status_var.set("Switched to YOLO-only tracking mode")
 
     def _on_open_video(self):
         """Open a video file using a file dialog."""
@@ -337,9 +366,10 @@ class VisionVideoApp:
         # Reset stats and frame index
         self.stats = StatsTracker()
         self.frame_index = 0
-        self.simple_yolo_id = 1  # reset pure YOLO ID counter
         self.stats = StatsTracker()
         self.frame_index = 0
+
+        self._reset_display_ids()
 
     def _show_about(self):
         """Show About dialog."""
@@ -377,8 +407,11 @@ class VisionVideoApp:
     def _process_frame(self, frame):
         """
         Process a single video frame:
+        - Apply optional image filters.
         - Run YOLO detection.
-        - Optionally run Kalman filter–based multi-object tracking.
+        - Run tracking in either:
+            * Kalman mode  (with prediction + update), or
+            * YOLO-only mode (no Kalman, matching only) while still keeping IDs.
         - Draw bounding boxes and labels.
         - Update statistics, heatmap, logger, and GUI display.
         """
@@ -405,116 +438,142 @@ class VisionVideoApp:
         detection_count = 0
 
         # ---------------------------------------------------------
-        # YOLO detection + optional Kalman tracking
+        # YOLO detection + tracking (Kalman or YOLO-only)
         # ---------------------------------------------------------
         if self.detection_enabled.get():
 
             # Always run YOLO first
             detections = self.detector.detect(frame)
 
-            # =====================================================
-            # CASE 1: "Use detection filter" enabled → use Kalman tracker
-            # =====================================================
-            if self.use_detection_filter.get():
+            # Checkbox meaning:
+            #   True  -> use Kalman prediction + update
+            #   False -> YOLO-only mode: matching only, no Kalman update
+            use_kalman = self.use_detection_filter.get()
 
-                if detections:
-                    # Extract plain bounding boxes from YOLO detections
-                    boxes = [d["box"] for d in detections]
+            if detections:
+                # Extract plain bounding boxes for the tracker
+                boxes = [d["box"] for d in detections]
+                tracks = self.tracker.update(
+                    boxes,
+                    self.frame_index,
+                    use_kalman=use_kalman,
+                )
+                detection_count = len(tracks)
 
-                    # Update the Kalman tracker (predict + match + update)
-                    tracks = self.tracker.update(boxes, self.frame_index)
-                    detection_count = len(tracks)
+                # -------------------------------------------------
+                # Update display-ID mapping (KF mode only)
+                # -------------------------------------------------
+                if use_kalman:
+                    # Active internal IDs in this frame
+                    active_internal_ids = {t["id"] for t in tracks}
 
-                    # Assign YOLO labels/confidence back to each track
-                    for track in tracks:
-                        box = track["box"]
-                        track_id = track["id"]
-                        x, y, w, h = box
+                    # Free display IDs whose tracks are no longer active
+                    for internal_id in list(self.display_id_map.keys()):
+                        if internal_id not in active_internal_ids:
+                            freed = self.display_id_map.pop(internal_id)
+                            self.free_display_ids.append(freed)
 
-                        # Compute track center for matching
-                        tcx = x + w / 2.0
-                        tcy = y + h / 2.0
+                    # Always reuse the smallest freed IDs first
+                    self.free_display_ids.sort()
 
-                        # Find nearest YOLO detection to recover label/conf
-                        best_det = None
-                        best_dist = float("inf")
-                        for det in detections:
-                            dx, dy, dw, dh = det["box"]
-                            dcx = dx + dw / 2.0
-                            dcy = dy + dh / 2.0
-                            dist2 = (dcx - tcx) ** 2 + (dcy - tcy) ** 2
-                            if dist2 < best_dist:
-                                best_dist = dist2
-                                best_det = det
+                # For each track, find the nearest YOLO detection so we can
+                # recover class label and confidence.
+                # Build a set of active track ids for this frame
+                active_ids = {t["id"] for t in tracks}
 
-                        # Track inherits YOLO label/confidence
-                        if best_det is not None:
-                            label = best_det["label"]
-                            conf = best_det["conf"]
-                        else:
-                            label = "object"
-                            conf = 0.0
+                # Release display IDs for tracks that are really finished
+                # (no longer in tracker._tracks)
+                for tid in list(self.display_id_map.keys()):
+                    if tid not in active_ids and not self.tracker.has_track(tid):
+                        freed = self.display_id_map.pop(tid)
+                        self.free_display_ids.append(freed)
+                        self.free_display_ids.sort()
 
-                        # Add detection point to heatmap
-                        self.heatmap.add_point(box)
+                for track in tracks:
+                    box = track["box"]
+                    track_id = track["id"]
+                    x, y, w, h = box
 
-                        # Draw the tracked bounding box
-                        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                    # Compute display ID:
+                    # KF mode -> stable 1,2,3...
+                    # YOLO-only -> use raw track_id
+                    if use_kalman:
+                        display_id = self.display_id_map.get(track_id)
+                        if display_id is None:
+                            # Re-use the smallest free ID if possible,
+                            # otherwise assign a new one.
+                            if self.free_display_ids:
+                                display_id = self.free_display_ids.pop(0)
+                            else:
+                                display_id = self.next_display_id
+                                self.next_display_id += 1
+                            self.display_id_map[track_id] = display_id
+                    else:
+                        display_id = track_id
 
-                        # Display ID + label + confidence
-                        cv2.putText(
-                            frame,
-                            f"ID {track_id} - {label} ({conf:.2f})",
-                            (x, max(0, y - 8)),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.5,
-                            (0, 255, 0),
-                            1,
-                        )
+                    # Track center
+                    tcx = x + w / 2.0
+                    tcy = y + h / 2.0
 
-                else:
-                    # No YOLO detections this frame → tracker only performs prediction
-                    self.tracker.update([], self.frame_index)
-                    detection_count = 0
+                    if use_kalman:
+                        display_id = self.display_id_map.get(track_id)
+                        if display_id is None:
+                            # Assign a new small display ID
+                            if self.free_display_ids:
+                                display_id = self.free_display_ids.pop(0)
+                            else:
+                                display_id = self.next_display_id
+                                self.next_display_id += 1
+                            self.display_id_map[track_id] = display_id
+                    else:
+                        display_id = track_id
 
-            # =====================================================
-            # CASE 2: "Use detection filter" disabled → YOLO only
-            # No Kalman filtering, no tracking IDs.
-            # =====================================================
-            else:
+                    # Track center
+                    tcx = x + w / 2.0
+                    tcy = y + h / 2.0
 
-                if detections:
-                    detection_count = len(detections)
-
-                    # Directly draw YOLO detections without tracking
+                    best_det = None
+                    best_dist = float("inf")
                     for det in detections:
-                        x, y, w, h = det["box"]
-                        label = det["label"]
-                        conf = det["conf"]
+                        dx, dy, dw, dh = det["box"]
+                        dcx = dx + dw / 2.0
+                        dcy = dy + dh / 2.0
+                        dist2 = (dcx - tcx) ** 2 + (dcy - tcy) ** 2
+                        if dist2 < best_dist:
+                            best_dist = dist2
+                            best_det = det
 
-                        # Assign a simple global ID (no temporal tracking)
-                        det_id = self.simple_yolo_id
-                        self.simple_yolo_id += 1
+                    if best_det is not None:
+                        label = best_det["label"]
+                        conf = best_det["conf"]
+                    else:
+                        label = "object"
+                        conf = 0.0
 
-                        # Heatmap uses raw YOLO box
-                        self.heatmap.add_point((x, y, w, h))
+                    # Add detection point to heatmap
+                    self.heatmap.add_point(box)
 
-                        # Draw YOLO box
-                        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                    # Draw bounding box (same for both modes)
+                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
-                        # Draw label with non-persistent ID
-                        cv2.putText(
-                            frame,
-                            f"ID {det_id} - {label} ({conf:.2f})",
-                            (x, max(0, y - 8)),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.5,
-                            (0, 255, 0),
-                            1,
-                        )
-                else:
-                    detection_count = 0
-                    # YOLO-only mode ignores tracker entirely
+                    # Show which mode is active in the label (optional)
+                    mode_tag = "KF" if use_kalman else "YOLO"
+                    cv2.putText(
+                        frame,
+                        f"{mode_tag} ID {display_id} - {label} ({conf:.2f})",
+                        (x, max(0, y - 8)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        (0, 255, 0),
+                        1,
+                    )
+
+
+            else:
+                # No detections this frame.
+                # We still call tracker.update() so that tracks age properly.
+                self.tracker.update([], self.frame_index, use_kalman=use_kalman)
+                detection_count = 0
 
         # ---------------------------------------------------------
         # Update side-panel statistics

@@ -94,10 +94,85 @@ class ObjectTracker:
         self._R = r * np.eye(2, dtype=np.float32)
         self._I = np.eye(4, dtype=np.float32)
 
+    def reset(self) -> None:
+        """
+        Reset all internal tracks and the ID counter.
+
+        Call this when starting a new run so that IDs begin again from 1.
+        """
+        self._tracks.clear()
+        self._finished_tracks.clear()
+        self._next_id = 1
+
+    def has_track(self, track_id: int) -> bool:
+        """Return True if this track is still active (not finished)."""
+        return track_id in self._tracks
+
+
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    def update(self, boxes: List[BBox], frame_index: int) -> List[Dict]:
+    def update(
+            self,
+            boxes: List[BBox],
+            frame_index: int,
+            use_kalman: bool = True,
+    ) -> List[Dict]:
+        """
+        Dispatch between:
+        - Kalman-based tracking (use_kalman=True)
+        - YOLO-only matching (use_kalman=False).
+        """
+        if use_kalman:
+            return self._update_kalman(boxes, frame_index)
+        else:
+            return self._update_yolo_only(boxes, frame_index)
+
+    # ------------------------------------------------------------------
+    # Summaries / export
+    # ------------------------------------------------------------------
+    def get_all_tracks(self) -> List[Dict]:
+        """Return all tracks (finished + still active)."""
+        return self._finished_tracks + list(self._tracks.values())
+
+    def get_object_summaries(self) -> List[Dict]:
+        """
+        Build a compact summary for each track.
+
+        For each track, we compute:
+            - id
+            - dwell_frames
+            - path_length
+            - avg_speed_per_frame
+        """
+        summaries: List[Dict] = []
+        for tr in self.get_all_tracks():
+            first = tr.get("first_frame", 1)
+            last = tr.get("last_frame", first)
+            dwell_frames = max(1, last - first + 1)
+            path_length = tr.get("path_length", 0.0)
+
+            if dwell_frames > 1:
+                avg_speed = path_length / (dwell_frames - 1)
+            else:
+                avg_speed = 0.0
+
+            summaries.append(
+                {
+                    "id": tr["id"],
+                    "dwell_frames": dwell_frames,
+                    "path_length": path_length,
+                    "avg_speed_per_frame": avg_speed,
+                }
+            )
+        return summaries
+
+    def _update_kalman(self, boxes: List[BBox], frame_index: int) -> List[Dict]:
+        """
+        Original Kalman-based update logic.
+        This is exactly the old behavior: IDs should be as stable as before.
+        """
 
         # No existing tracks: start a new track per box
         if not self._tracks:
@@ -214,16 +289,13 @@ class ObjectTracker:
             new_id = self._next_id - 1
             active_track_ids.add(new_id)
 
-        # Build list of active tracks for this frame (those with a detection now)
-        # Build list of active tracks for this frame (those with a detection now)
+        # 6) Build list of active tracks for this frame (those with a detection now)
         active_tracks = []
         for track_id in active_track_ids:
             t = self._tracks.get(track_id)
             if t is None:
                 continue
 
-            # Return a rich view of the track so behavior analysis
-            # can use velocity, last_center, etc.
             active_tracks.append(
                 {
                     "id": t["id"],
@@ -239,44 +311,151 @@ class ObjectTracker:
 
         return active_tracks
 
-    # ------------------------------------------------------------------
-    # Summaries / export
-    # ------------------------------------------------------------------
-    def get_all_tracks(self) -> List[Dict]:
-        """Return all tracks (finished + still active)."""
-        return self._finished_tracks + list(self._tracks.values())
 
-    def get_object_summaries(self) -> List[Dict]:
+    def _update_yolo_only(self, boxes: List[BBox], frame_index: int) -> List[Dict]:
         """
-        Build a compact summary for each track.
-
-        For each track, we compute:
-            - id
-            - dwell_frames
-            - path_length
-            - avg_speed_per_frame
+        YOLO-only tracking:
+        - No Kalman prediction or update.
+        - Use IoU + distance matching between current boxes and last boxes.
+        - Keep stable IDs across frames as long as matching succeeds.
         """
-        summaries: List[Dict] = []
-        for tr in self.get_all_tracks():
-            first = tr.get("first_frame", 1)
-            last = tr.get("last_frame", first)
-            dwell_frames = max(1, last - first + 1)
-            path_length = tr.get("path_length", 0.0)
 
-            if dwell_frames > 1:
-                avg_speed = path_length / (dwell_frames - 1)
-            else:
-                avg_speed = 0.0
-
-            summaries.append(
+        # No existing tracks: start a new track for every detection box.
+        if not self._tracks:
+            for box in boxes:
+                self._start_new_track(box, frame_index)
+            return [
                 {
-                    "id": tr["id"],
-                    "dwell_frames": dwell_frames,
-                    "path_length": path_length,
-                    "avg_speed_per_frame": avg_speed,
+                    "id": t["id"],
+                    "box": t["box"],
+                    "center": t["center"],
+                }
+                for t in self._tracks.values()
+            ]
+
+        # 1) In YOLO-only mode, we do NOT run Kalman predict.
+        #    We simply treat the last known box as the "prediction".
+        #    (pred_box / pred_center are already maintained for each track.)
+
+        # 2) Assign detections to tracks using IoU + distance
+        assignments: Dict[int, int] = {}  # det_index -> track_id
+        unmatched_track_ids = set(self._tracks.keys())
+        detection_centers = [self._center_of(b) for b in boxes]
+
+        for det_index, (box, meas_center) in enumerate(
+            zip(boxes, detection_centers)
+        ):
+            best_id: Optional[int] = None
+            best_iou: float = 0.0
+            best_dist: float = float("inf")
+
+            for track_id in unmatched_track_ids:
+                track = self._tracks[track_id]
+
+                pred_box = track["pred_box"]
+                iou = self._iou(box, pred_box)
+
+                pcx, pcy = track["pred_center"]
+                mcx, mcy = meas_center
+                dist = math.hypot(mcx - pcx, mcy - pcy)
+
+                # Prefer higher IoU; if IoU ties, prefer smaller distance
+                if iou > best_iou or (iou == best_iou and dist < best_dist):
+                    best_iou = iou
+                    best_dist = dist
+                    best_id = track_id
+
+            # Accept match if IoU high enough, or distance small enough
+            if best_id is not None and (
+                best_iou >= self.min_iou or best_dist <= self.max_distance
+            ):
+                assignments[det_index] = best_id
+                unmatched_track_ids.remove(best_id)
+
+        matched_track_ids = set(assignments.values())
+
+        # 3) Update matched tracks with raw YOLO boxes (no Kalman)
+        active_track_ids = set()
+        for det_index, track_id in assignments.items():
+            meas_box = boxes[det_index]
+            meas_center = detection_centers[det_index]
+            track = self._tracks[track_id]
+
+            # Simply use the detection as the current state
+            track["box"] = meas_box
+            track["center"] = meas_center
+            track["last_frame"] = frame_index
+
+            # Path length based on centers
+            last_cx, last_cy = track["last_center"]
+            cx, cy = track["center"]
+            step_dist = math.hypot(cx - last_cx, cy - last_cy)
+            track["path_length"] += step_dist
+            track["last_center"] = (cx, cy)
+
+            track["missed"] = 0
+            track["history"].append((frame_index, meas_box))
+
+            # For the next frame, this current detection becomes the "prediction"
+            track["pred_center"] = track["center"]
+            track["pred_box"] = track["box"]
+
+            active_track_ids.add(track_id)
+
+        # 4) Age unmatched tracks
+        to_finish = []
+        for track_id in list(self._tracks.keys()):
+            if track_id not in matched_track_ids:
+                track = self._tracks[track_id]
+                track["missed"] += 1
+
+                track["center"] = track["pred_center"]
+                track["box"] = track["pred_box"]
+                track["last_frame"] = frame_index
+
+                last_cx, last_cy = track["last_center"]
+                cx, cy = track["center"]
+                step_dist = math.hypot(cx - last_cx, cy - last_cy)
+                track["path_length"] += step_dist
+                track["last_center"] = (cx, cy)
+
+                if track["missed"] > self.max_missed:
+                    to_finish.append(track_id)
+
+        for track_id in to_finish:
+            self._finished_tracks.append(self._tracks.pop(track_id))
+
+        # 5) Any detection that was not assigned starts a new track.
+        assigned_det_indices = set(assignments.keys())
+        for det_index, box in enumerate(boxes):
+            if det_index in assigned_det_indices:
+                continue
+            self._start_new_track(box, frame_index)
+            new_id = self._next_id - 1
+            active_track_ids.add(new_id)
+
+        # 6) Build list of active tracks for this frame.
+        active_tracks = []
+        for track_id in active_track_ids:
+            t = self._tracks.get(track_id)
+            if t is None:
+                continue
+
+            active_tracks.append(
+                {
+                    "id": t["id"],
+                    "box": t["box"],
+                    "center": t["center"],
+                    "last_center": t.get("last_center"),
+                    "kf_state": t.get("kf_state"),
+                    "path_length": t.get("path_length", 0.0),
+                    "first_frame": t.get("first_frame"),
+                    "last_frame": t.get("last_frame"),
                 }
             )
-        return summaries
+
+        return active_tracks
+
 
     def export_object_summaries_csv(self, path: str, fps: Optional[float] = None) -> str:
         """
