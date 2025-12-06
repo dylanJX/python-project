@@ -412,7 +412,7 @@ class VisionVideoApp:
 
                     # Behavior analysis (still uses box + frame size)
                     behavior_info = self.behavior.analyze(
-                        box, self.frame_width, self.frame_height
+                        track, self.frame_width, self.frame_height
                     )
                     behavior_text = behavior_info["status"]
 
